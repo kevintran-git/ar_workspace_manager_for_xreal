@@ -29,7 +29,26 @@ This contradicts the widely repeated claim that Air 2 Ultra camera access requir
 Nebula, or a Snapdragon host. XREAL's documented Snapdragon requirement concerns their IMU
 sensor-fusion pipeline, not the cameras, which are class-compliant.
 
-## Frames carry real image content
+## The cameras image the real scene
+
+Verified by occlusion. Mean frame brightness across three 8-second phases, discarding the
+first 3 seconds of each so auto-exposure settles:
+
+| Phase | Mean brightness |
+|---|---|
+| Lenses uncovered, pointed at the room | 67.25 |
+| Both lenses covered by a palm | 18.47 |
+| Uncovered again | 53.70 |
+
+A 48.78 drop under occlusion, recovering on uncover. The sensor responds to incident light,
+so the frames are of the real scene and the horizontal strips are purely a byte-layout
+problem.
+
+This test is necessary rather than optional. The supporting spatial statistics below are
+consistent with real imagery but do not prove it on their own: if the stream were a packed
+raw format such as 10-bit MIPI, adjacent bytes would share bits from the same pixel and
+produce high horizontal smoothness with no scene imaged at all. Occlusion is what separates
+the two cases.
 
 Smoothness metric — fraction of adjacent byte pairs differing by <= 6:
 
@@ -69,17 +88,26 @@ layout.
 
 ## Next steps
 
-1. Sweep block sizes rather than row widths — test 8x8, 16x16, and 32x32 tile interleave.
-2. Try 10-bit packed MIPI unpacking (4 pixels per 5 bytes).
-3. Probe UVC extension units on interface 3 for a format or mode selector.
-4. Compare against a Linux `v4l2-ctl --list-formats-ext` dump, which reports raw UVC
-   descriptors more completely than AVFoundation does.
+Occlusion has ruled out the sensor-initialisation branch, so all remaining work is decoding.
+
+1. Take a Linux `v4l2-ctl --list-formats-ext` dump first — it reports raw UVC descriptors
+   more completely than AVFoundation, and a packed raw format would show up directly,
+   settling the layout without further search.
+2. Sweep block sizes rather than row widths — test 8x8, 16x16, and 32x32 tile interleave.
+3. Try 10-bit packed MIPI unpacking (4 pixels per 5 bytes).
+4. Probe UVC extension units on interface 3 for a format or mode selector.
+
+Validate any candidate layout against a controlled scene rather than by eye: capture with
+the lenses covered and uncovered, and require that the decoded image go uniformly dark under
+occlusion.
 
 ## Tools
 
 - `capture-raw.swift` — writes one frame to `/tmp/xreal_raw.bin`
 - `layout-search.swift` — scores candidate layouts by smoothness against a noise baseline
-- `temporal-analysis.swift` — distinguishes live imaging from fixed pattern output
+- `temporal-analysis.swift` — frame-to-frame and per-row brightness statistics
+- `occlusion-test.swift` — prompts through a cover/uncover sequence and reports whether the
+  sensor responds to light; the decisive test for real imaging
 - `../../Scripts/probe-usb-descriptors.sh` — dumps USB interface and endpoint descriptors
 
 Build any of them with `swiftc -o /tmp/<name> <file>.swift`. Camera permission is required;
