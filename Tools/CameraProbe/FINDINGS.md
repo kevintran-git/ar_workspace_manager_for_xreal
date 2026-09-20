@@ -25,6 +25,18 @@ Full interface map:
 
     640x241 'yuvs' @ 59.99988 fps
 
+The streaming endpoint is **bulk, not isochronous**. Interface 4 carries a single endpoint,
+`0x84`, with `bmAttributes` transfer type 2. A class-compliant webcam almost always streams
+isochronous so the host reserves bandwidth and tolerates dropped packets. Bulk streaming
+instead delivers each frame as an exact, retried byte sequence terminated by a short packet,
+which means the 308480-byte payload is byte-exact rather than a best-effort reassembly. A
+layout search can therefore trust the byte count and offsets completely; corruption is not a
+candidate explanation for the strips.
+
+The UVC descriptor declares the stream as YUY2, 640x241, `bBitsPerPixel` 16,
+`dwMaxVideoFrameBufferSize` 308480. AVFoundation reports that verbatim, so `yuvs` is the
+device's own claim rather than a macOS guess.
+
 This contradicts the widely repeated claim that Air 2 Ultra camera access requires NRSDK,
 Nebula, or a Snapdragon host. XREAL's documented Snapdragon requirement concerns their IMU
 sensor-fusion pipeline, not the cameras, which are class-compliant.
@@ -41,14 +53,15 @@ first 3 seconds of each so auto-exposure settles:
 | Uncovered again | 53.70 |
 
 A 48.78 drop under occlusion, recovering on uncover. The sensor responds to incident light,
-so the frames are of the real scene and the horizontal strips are purely a byte-layout
+so the frames are of the real scene and the horizontal strips were purely a byte-layout
 problem.
 
 This test is necessary rather than optional. The supporting spatial statistics below are
 consistent with real imagery but do not prove it on their own: if the stream were a packed
 raw format such as 10-bit MIPI, adjacent bytes would share bits from the same pixel and
-produce high horizontal smoothness with no scene imaged at all. Occlusion is what separates
-the two cases.
+produce high horizontal smoothness with no scene imaged at all. Occlusion is what separated
+the two cases, and it is what kept the search pointed at decoding rather than at sensor
+initialisation.
 
 Smoothness metric — fraction of adjacent byte pairs differing by <= 6:
 
@@ -61,49 +74,87 @@ Auto-exposure convergence is visible across the first ~25 frames: mean brightnes
 0 -> 27 -> 40 -> 54 and settles near 51. The first 3–4 frames after stream start are all
 zero (sensor warmup) and must be discarded.
 
-## Unsolved: the byte layout is not raster
+## Solved: the payload is a block-permuted 480x640 greyscale frame
 
-Every raster interpretation renders as horizontal strips. Confirmed ruled out:
+The image is not scrambled at the pixel level. The 307200 image bytes are **128 blocks of
+2400 bytes**, permuted by a fixed table. Inside a block the bytes are already in order, which
+is why the frame looked like correctly-sized horizontal strips in the wrong places and why
+row means were near-identical — each strip samples a different part of the scene.
 
-- plain 640x480 (307200 bytes) with a 1280-byte header
-- two 640x240 frames stacked
-- row deinterleave, and field split (top/bottom halves interleaved)
-- serpentine scan — vertical smoothness collapses to 0.15
-- YUY2 even/odd byte-plane separation at every width 64–900
-- exhaustive width sweep 64–1300 at offsets 0 and 1280
+The permutation is constant, but its phase rotates every frame. Logical block `t` lives in
+raw block `REORDER[(align + t) % 128]`.
 
-Natural photographs score V/H gradient ratio 0.93–1.16. Every candidate layout scores
-2.1–2.6, so rows hold image data but are not arranged as a raster.
+Phase recovery needs no state. Score each raw block by the sum of its first 128 bytes and
+take the minimum: the sensor's first readout line sits in the fisheye lens's black vignette,
+so that block is always logical block 0. Invert through the table to get `align`.
 
-The decisive measurement: **across-row brightness spread is 0.86 while the same row varies
-13.22 over time.** In a raster image of a natural scene, rows differ substantially from each
-other. Near-identical row means indicate each 640-byte chunk samples the entire scene rather
-than one scanline — consistent with block interleaving or a packed raw sensor format
-(e.g. 10-bit MIPI) being mislabelled as `yuvs` in the UVC descriptor. SLAM sensors commonly
-emit formats never intended for a generic video pipeline.
+After un-permuting, the 640-byte lines are **columns** of the upright image. The sensors are
+mounted rotated 90 degrees, so `upright[r][c] = scan[c*640 + r]` yields **480x640 portrait,
+8-bit greyscale, one byte per pixel**. The `yuvs` / 640x241 / bpp=16 descriptor is packaging
+only: 241 rows x 2 bytes per pixel = 482 byte rows.
 
-Frame arithmetic worth noting: 308480 bytes = 640 x 482 = 640 x 480 + 1280 = 640 x 241 x 2.
-All three decompositions are numerically consistent, so byte count alone does not settle the
-layout.
+Verified on this hardware: `/tmp/xreal_raw.bin` decodes to a recognisable fisheye view of the
+room. V/H gradient ratio goes from 2.13 undecoded to 1.24 decoded, inside the 0.93–1.16 band
+natural photographs occupy.
 
-## Next steps
+    bytes      0 .. 307199   image, 128 x 2400 permuted blocks
+    byte row   480           per-frame metadata  (307200 .. 307839)
+    byte row   481           constant 0x5C padding
 
-Occlusion has ruled out the sensor-initialisation branch, so all remaining work is decoding.
+Frame arithmetic: 308480 bytes = 640 x 482 = 640 x 480 + 1280 = 640 x 241 x 2. All three
+decompositions hold, and the first one is the real structure.
 
-1. Take a Linux `v4l2-ctl --list-formats-ext` dump first — it reports raw UVC descriptors
-   more completely than AVFoundation, and a packed raw format would show up directly,
-   settling the layout without further search.
-2. Sweep block sizes rather than row widths — test 8x8, 16x16, and 32x32 tile interleave.
-3. Try 10-bit packed MIPI unpacking (4 pixels per 5 bytes).
-4. Probe UVC extension units on interface 3 for a format or mode selector.
+## Stereo is frame-alternating, keyed by metadata
 
-Validate any candidate layout against a controlled scene rather than by eye: capture with
-the lenses covered and uncovered, and require that the decoded image go uniformly dark under
-occlusion.
+One UVC frame carries one complete camera, so 60 fps yields ~30 stereo pairs per second.
+Arrival order does not identify the eye. The metadata row does:
+
+| Metadata offset | Meaning |
+|---|---|
+| `+0x00` .. `+0x07` | uint64 LE nanosecond timestamp, differs per camera |
+| `+0x12` .. `+0x13` | int16 LE sequence number, **shared by both frames of a pair** |
+| `+0x3A` | camera ID — `0x20` / `0x21` |
+| `+0x3E` .. `+0x45` | uint64 LE microsecond timestamp, same for both cameras |
+
+Pair frames by matching sequence number, then assign eyes by camera ID.
+
+Upstream implementations read the camera ID at `+0x3B`. On this unit the ID is at `+0x3A`
+and `+0x3B` reads `0x00` — a one-byte disagreement worth re-checking against a second
+capture before treating either offset as settled.
+
+## Ruled out along the way
+
+Recorded so the search is not repeated: plain 640x480 with a 1280-byte header; two 640x240
+frames stacked; row deinterleave and field split; serpentine scan; YUY2 even/odd byte-plane
+separation at every width 64–900; exhaustive width sweep 64–1300 at offsets 0 and 1280;
+column-major transpose of the raw stream; RAW10 unpacking; per-row DC and gain normalisation;
+inter-row shear. None of these help, because the corruption is block order, not pixel order.
+
+## Provenance
+
+The reorder table originates in `mazeasdamien/myXreal` (Windows / DirectShow,
+`src/driver/stereo_camera.cpp`) and appears byte-identical in three independent
+reimplementations: `DeskUnreal/xreal-vio-vr` (GStreamer element `xrealultra2dec`),
+`vladoshub/xr-gate` (V4L2, feeds Basalt VIO), and `sean9061/xreal-air2ultra-camera`
+(macOS / AVFoundation, and the best written up). Public disclosure point is
+`badicsalex/ar-drivers-rs` issue #16, comment by Benjamin Berg, 2025-05-09.
+
+Monado, XRLinuxDriver, OpenHMD, and ar-drivers-rs all remain IMU-only for this device.
+
+## Open
+
+- UVC extension unit on interface 3, unit 4, GUID `41769ea2-04de-e347-8b2b-f4341aff003b`.
+  Every selector probed upstream returned a PIPE error, so its function is unknown.
+- Why the blocks are permuted at all. DMA artefact and deliberate obfuscation are both
+  consistent with the evidence.
+- The `+0x3A` versus `+0x3B` camera ID discrepancy above.
 
 ## Tools
 
 - `capture-raw.swift` — writes one frame to `/tmp/xreal_raw.bin`
+- `descramble.swift` — the decoder. With no argument it opens the live camera, pairs frames
+  by sequence number and writes `/tmp/xreal_{left,right}_N.png`. Given a path it decodes one
+  308480-byte raw frame to a single PNG.
 - `layout-search.swift` — scores candidate layouts by smoothness against a noise baseline
 - `temporal-analysis.swift` — frame-to-frame and per-row brightness statistics
 - `occlusion-test.swift` — prompts through a cover/uncover sequence and reports whether the
