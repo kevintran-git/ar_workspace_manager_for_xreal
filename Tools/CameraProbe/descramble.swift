@@ -44,12 +44,19 @@ func descramble(_ raw: UnsafePointer<UInt8>) -> Frame {
         }
     }
 
+    let cameraID = raw[metaOffset + 0x3A]
+    let opposed = cameraID == 0x20
+
     var upright = [UInt8](repeating: 0, count: outW * outH)
     scan.withUnsafeBufferPointer { s in
         upright.withUnsafeMutableBufferPointer { d in
             for c in 0..<sensorH {
                 let line = s.baseAddress! + c * sensorW
-                for r in 0..<sensorW { d[r * outW + c] = line[r] }
+                if opposed {
+                    for r in 0..<sensorW { d[(outH - 1 - r) * outW + (outW - 1 - c)] = line[r] }
+                } else {
+                    for r in 0..<sensorW { d[r * outW + c] = line[r] }
+                }
             }
         }
     }
@@ -57,7 +64,7 @@ func descramble(_ raw: UnsafePointer<UInt8>) -> Frame {
     var ts: UInt64 = 0
     for i in (0..<8).reversed() { ts = (ts << 8) | UInt64(raw[metaOffset + i]) }
     let seq = UInt16(raw[metaOffset + 18]) | (UInt16(raw[metaOffset + 19]) << 8)
-    return Frame(pixels: upright, cameraID: raw[metaOffset + 0x3A], sequence: seq, timestampNS: ts)
+    return Frame(pixels: upright, cameraID: cameraID, sequence: seq, timestampNS: ts)
 }
 
 func writePNG(_ px: [UInt8], _ w: Int, _ h: Int, _ path: String) {

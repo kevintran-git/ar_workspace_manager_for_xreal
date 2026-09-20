@@ -93,9 +93,14 @@ mounted rotated 90 degrees, so `upright[r][c] = scan[c*640 + r]` yields **480x64
 8-bit greyscale, one byte per pixel**. The `yuvs` / 640x241 / bpp=16 descriptor is packaging
 only: 241 rows x 2 bytes per pixel = 482 byte rows.
 
-Verified on this hardware: `/tmp/xreal_raw.bin` decodes to a recognisable fisheye view of the
-room. V/H gradient ratio goes from 2.13 undecoded to 1.24 decoded, inside the 0.93–1.16 band
-natural photographs occupy.
+The two sensors are mounted 180 degrees apart, so camera `0x20` needs the transpose rotated
+as well: `upright[639-r][479-c] = scan[c*640 + r]`. Applying the same transpose to both eyes
+leaves one image upside down. Confirmed visually — both eyes now show the same room right
+way up, offset by the stereo baseline.
+
+Verified on this hardware, live and offline. A stored frame decodes to a recognisable fisheye
+view of the room, and the live path produces upright stereo pairs. V/H gradient ratio goes
+from 2.13 undecoded to 1.24 decoded, inside the 0.93–1.16 band natural photographs occupy.
 
     bytes      0 .. 307199   image, 128 x 2400 permuted blocks
     byte row   480           per-frame metadata  (307200 .. 307839)
@@ -119,8 +124,16 @@ Arrival order does not identify the eye. The metadata row does:
 Pair frames by matching sequence number, then assign eyes by camera ID.
 
 Upstream implementations read the camera ID at `+0x3B`. On this unit the ID is at `+0x3A`
-and `+0x3B` reads `0x00` — a one-byte disagreement worth re-checking against a second
-capture before treating either offset as settled.
+and `+0x3B` reads `0x00`. Checked across nine live frames as well as the stored capture, so
+the disagreement is real on this hardware rather than an artefact of one frame.
+
+Two further observations from the live run that upstream does not describe:
+
+- The sequence number steps by 256 per stereo pair, not by 1. Pairing by equality still
+  works; treating the field as a frame counter does not.
+- The nanosecond timestamp at `+0x00` is not monotonic across frames. It may not be a plain
+  uint64 nanosecond value. Pairing does not depend on it, so this is unresolved rather than
+  blocking.
 
 ## Ruled out along the way
 
@@ -153,8 +166,9 @@ Monado, XRLinuxDriver, OpenHMD, and ar-drivers-rs all remain IMU-only for this d
 
 - `capture-raw.swift` — writes one frame to `/tmp/xreal_raw.bin`
 - `descramble.swift` — the decoder. With no argument it opens the live camera, pairs frames
-  by sequence number and writes `/tmp/xreal_{left,right}_N.png`. Given a path it decodes one
-  308480-byte raw frame to a single PNG.
+  by sequence number and writes four upright stereo pairs to
+  `/tmp/xreal_{left,right}_N.png`. Given a path it decodes one 308480-byte raw frame to a
+  single PNG.
 - `layout-search.swift` — scores candidate layouts by smoothness against a noise baseline
 - `temporal-analysis.swift` — frame-to-frame and per-row brightness statistics
 - `occlusion-test.swift` — prompts through a cover/uncover sequence and reports whether the
