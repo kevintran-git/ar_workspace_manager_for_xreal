@@ -5,7 +5,10 @@ let jsonCInclude = "/opt/homebrew/opt/json-c/include/json-c"
 // VLCKit binary framework (LGPL, fetched by Scripts/fetch-vlckit.sh — not in git). Its libvlc C API
 // headers ship inside the framework but are excluded from its module map, so the CVLCKit shim target
 // re-exposes them to Swift via this search path.
-let vlcHeaders = "vendor/VLCKit/VLCKit.xcframework/macos-arm64_x86_64/VLCKit.framework/Headers"
+// Absolute package root: newer SwiftPM (swift-build backend) runs compilers from the PARENT
+// directory, so relative -I/-L flags would resolve to the wrong place.
+let packageRoot = String(#filePath.dropLast("/Package.swift".count))
+let vlcHeaders = "\(packageRoot)/vendor/VLCKit/VLCKit.xcframework/macos-arm64_x86_64/VLCKit.framework/Headers"
 
 let package = Package(
     name: "VRDesktop",
@@ -27,7 +30,7 @@ let package = Package(
                 .linkedFramework("IOKit"),
                 .linkedFramework("CoreFoundation"),
                 .linkedFramework("AppKit"),
-                .unsafeFlags(["-L", "vendor/lib", "-ljson-c"]),
+                .unsafeFlags(["-L", "\(packageRoot)/vendor/lib", "-ljson-c"]),
             ]
         ),
         .target(name: "GlassesDriver", dependencies: ["CXrealDriver"]),

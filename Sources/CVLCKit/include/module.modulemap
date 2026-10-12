@@ -1,0 +1,4 @@
+module CVLCKit {
+    header "CVLCKit.h"
+    export *
+}

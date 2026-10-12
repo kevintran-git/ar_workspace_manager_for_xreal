@@ -32,6 +32,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <unistd.h>
 
 #include <Fusion/Fusion.h>
 #include "json.h"
@@ -106,7 +107,18 @@ static bool send_payload(device_imu_type *device, uint8_t size, const uint8_t *p
 		payload_size = MAX_PACKET_SIZE;
 	}
 
-	int transferred = hid_write(device->handle, payload, payload_size);
+	/* Writes can transiently fail right after plug-in or while the IMU is flooding reports from a
+	 * previous session — retry a few times before giving up. */
+	int transferred = -1;
+	for (int attempt = 0; attempt < 5; attempt++)
+	{
+		transferred = hid_write(device->handle, payload, payload_size);
+		if (transferred == payload_size)
+		{
+			break;
+		}
+		usleep(20 * 1000);
+	}
 
 	if (transferred != payload_size)
 	{
@@ -238,7 +250,28 @@ static FusionQuaternion json_object_get_quaternion(struct json_object *obj)
 	return quaternion;
 }
 
+static device_imu_error_type device_imu_open_impl(device_imu_type *device, device_imu_event_callback callback);
+
+/* Opens the IMU. Any failure after the HID layer is initialised releases everything the attempt
+ * acquired — most importantly the HID handle, which hidapi opens in EXCLUSIVE (seize) mode on
+ * macOS. Without this, a single failed handshake (e.g. a write that fails while the glasses are
+ * still streaming from a previous session, or just after plug-in) leaked a seized handle, and
+ * every later retry failed with "No handle" until the app quit or the glasses were replugged. */
 device_imu_error_type device_imu_open(device_imu_type *device, device_imu_event_callback callback)
+{
+	const device_imu_error_type result = device_imu_open_impl(device, callback);
+
+	if ((result != DEVICE_IMU_ERROR_NO_ERROR) &&
+			(result != DEVICE_IMU_ERROR_NO_DEVICE) &&
+			(result != DEVICE_IMU_ERROR_NOT_INITIALIZED))
+	{
+		device_imu_close(device); /* hid_close + device_exit + frees partial allocations */
+	}
+
+	return result;
+}
+
+static device_imu_error_type device_imu_open_impl(device_imu_type *device, device_imu_event_callback callback)
 {
 	if (!device)
 	{

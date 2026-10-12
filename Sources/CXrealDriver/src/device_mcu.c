@@ -220,7 +220,25 @@ static bool do_payload_action(device_mcu_type *device, uint16_t msgid, uint8_t l
 	return false;
 }
 
+static device_mcu_error_type device_mcu_open_impl(device_mcu_type *device, device_mcu_event_callback callback);
+
+/* Same handle-leak guard as device_imu_open: a failed handshake must not leave the (exclusively
+ * opened) MCU HID handle seized, or every later open fails until the glasses are replugged. */
 device_mcu_error_type device_mcu_open(device_mcu_type *device, device_mcu_event_callback callback)
+{
+	const device_mcu_error_type result = device_mcu_open_impl(device, callback);
+
+	if ((result != DEVICE_MCU_ERROR_NO_ERROR) &&
+			(result != DEVICE_MCU_ERROR_NO_DEVICE) &&
+			(result != DEVICE_MCU_ERROR_NOT_INITIALIZED))
+	{
+		device_mcu_close(device);
+	}
+
+	return result;
+}
+
+static device_mcu_error_type device_mcu_open_impl(device_mcu_type *device, device_mcu_event_callback callback)
 {
 	if (!device)
 	{
